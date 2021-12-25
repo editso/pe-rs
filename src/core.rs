@@ -1,44 +1,51 @@
-use std::{
-    collections::HashMap,
-    f32::consts::E,
-    io::{self, Read},
-    iter::TakeWhile,
-    ops::Add,
-};
+use std::{any::Any, collections::HashMap, fmt::Debug, ops::Add};
 
 use crate::*;
 
+#[derive(Debug)]
 pub enum Arch {
     X86,
     X64,
 }
 
 #[allow(unused)]
+#[derive(Debug)]
 pub struct Section {
     pub name: String,
     pub virtual_address: usize,
     pub pointer_to_raw_data: usize,
     pub size_of_raw_data: usize,
-    pub(crate) offset_of_self: usize,
-    pub(crate) raw_ptr: *mut u8,
+    pub offset_of_self: usize,
 }
 
-pub struct Reloc {}
+#[allow(unused)]
+#[derive(Debug)]
+pub struct Reloc {
+    /// rva 基础偏移
+    base_of_rva_offset: usize,
+    /// fov 基础偏移
+    base_of_fov_offset: usize,
+    /// 相对基础偏移, 所有需要修复的地址
+    /// Reloc.base_offset + reloc_offset = 真实需要修复的地址
+    reloc_offsets: Vec<(u8, WORD, ULONGLONG)>,
+    /// 重定位表 fov 地址
+    offset_of_fov: usize,
+}
 
 #[derive(Debug)]
 pub struct Function {
     /// 函数名称
     pub name: String,
     /// 所在偏移
-    pub offset_of_self: usize,
+    pub offset_of_iat: usize,
 }
 
 #[derive(Debug)]
-pub struct Oridnal {
+pub struct Ordinal {
     /// 序号
-    pub oridnal: usize,
+    pub ordinal: usize,
     /// 所在偏移
-    pub offset_of_self: usize,
+    pub offset_of_iat: usize,
 }
 
 #[derive(Debug)]
@@ -47,50 +54,53 @@ pub enum Import {
     /// 以函数名称导入
     Function(Function),
     /// 以序号导入
-    Oridnal(Oridnal),
+    Ordinal(Ordinal),
 }
 
+#[derive(Debug)]
 /// 导出表
 pub enum Export {
     /// 以函数名称导出
     Function(Function),
     /// 以序号导出
-    Oridnal(Oridnal),
+    Ordinal(Ordinal),
 }
 
 #[allow(unused)]
+#[derive(Debug)]
 pub struct Meta {
-    arch: Arch,
+    pub arch: Arch,
     /// 导入表信息
-    imports: HashMap<String, Vec<Import>>,
+    pub imports: HashMap<String, Vec<Import>>,
     /// 导出表信息
-    exports: HashMap<String, Vec<Export>>,
+    pub exports: Vec<Export>,
     /// 重定位表信息
-    relocs: Vec<Reloc>,
+    pub relocs: Vec<Reloc>,
     /// 节表信息
-    sections: Vec<Section>,
+    pub sections: Vec<Section>,
     /// image base
-    image_base: usize,
+    pub image_base: usize,
     /// image 的大小
-    size_of_image: usize,
+    pub size_of_image: usize,
     /// 入口点
-    entry_pointer: usize,
+    pub entry_pointer: usize,
     /// 文件对齐
-    file_alignment: usize,
+    pub file_alignment: usize,
     /// 内存对齐
-    section_alignment: usize,
+    pub section_alignment: usize,
     /// nt头的偏移
-    offset_of_nt_header: usize,
+    pub offset_of_nt_header: usize,
     /// file头的偏移
-    offset_of_file_header: usize,
+    pub offset_of_file_header: usize,
     /// 可选PE头偏移
-    offset_of_section_header: usize,
+    pub offset_of_section_header: usize,
     /// optional头的偏移
-    offset_of_optional_header: usize,
+    pub offset_of_optional_header: usize,
     /// 可选PE头大小
-    size_of_optional_header: usize,
+    pub size_of_optional_header: usize,
 }
 
+#[allow(unused)]
 pub struct PE {
     pub(crate) meta: Meta,
     pub(crate) parse: Box<dyn PeParse>,
@@ -186,13 +196,13 @@ pub trait PeParse {
 
                     // 最高位如果为1说明是以序号导入
                     // 否则则按名称导入
-                    if iat.u1.Ordinal >> 63 == 1{
-                        import_functions.push(Import::Oridnal(
-                            Oridnal{
-                                offset_of_self: offset,
-                                oridnal: (iat.u1.Ordinal & !(0b1 << 63)) as usize
+                    let import = if iat.u1.Ordinal >> 63 == 1{
+                        Import::Ordinal(
+                            Ordinal{
+                                offset_of_iat: offset,
+                                ordinal: (iat.u1.Ordinal & !(0b1 << 63)) as usize
                             }
-                        ));
+                        )
                     }else{
                         let iin = try_as!(IMAGE_IMPORT_BY_NAME, ptr, iat.u1.Function.to_fov(sections)?);
 
@@ -200,12 +210,15 @@ pub trait PeParse {
 
                         os_str!(name in iin.Name.as_mut_ptr());
 
-                        import_functions.push(Import::Function(Function{
-                            offset_of_self: offset,
+                        Import::Function(Function{
+                            offset_of_iat: offset,
                             name: String::from_utf8(name).unwrap(),
-                        }));
+                        })
 
-                    }
+                    };
+
+                    import_functions.push(import);
+
                 });
 
                 import_map.insert(name, import_functions);
@@ -215,11 +228,93 @@ pub trait PeParse {
         Ok(import_map)
     }
 
-    fn parse_reloc(_: *mut u8, _: usize) -> Result<Vec<Reloc>>
+    /// 解析重定位表
+    fn parse_reloc(ptr: *mut u8, sections: &[Section], virtual_address: usize) -> Result<Vec<Reloc>>
     where
         Self: Sized,
     {
-        unimplemented!()
+        // 解析好后的重定位表信息
+        let mut relocs = Vec::new();
+
+        unsafe {
+            // 拿到第一个重定位表
+            let mut reloc_ptr = try_ptr!(
+                IMAGE_BASE_RELOCATION,
+                ptr,
+                virtual_address.to_fov(sections)?
+            );
+
+            loop {
+                if reloc_ptr.is_null() {
+                    return Err(Error::InvalidPE);
+                }
+
+                // 相对 ptr 的偏移量
+                let offset = reloc_ptr as usize - ptr as usize;
+
+                let reloc = reloc_ptr.as_ref().unwrap();
+
+                // 如果重定位表任意字段都为0代表重定位表结束
+                if reloc.VirtualAddress == 0 {
+                    break;
+                }
+
+                // 整个块中需要重定位的总数量
+                // 这个总数量是不准确的
+                // 高4如果不为0则代表需要重定位
+                let reloc_num = (reloc.SizeOfBlock as usize - IMAGE_BASE_RELOCATION::size()) / 2;
+
+                // 指向第一个需要重定位的偏移
+                let relocs_ptr = ptr.add(offset + IMAGE_BASE_RELOCATION::size()) as *const WORD;
+
+                // 所有需要重定位偏移
+                let reloc_offsets = std::slice::from_raw_parts(relocs_ptr, reloc_num)
+                    .iter()
+                    .fold(Vec::new(), |mut relocs, e| {
+                        let typ = e >> 12;
+
+                        (typ == 10 || typ == 3).then(|| {
+                            // 真实偏移量是低12位
+                            let offset = e & 0xFFF;
+
+                            let value_offset = (reloc.VirtualAddress as usize + offset as usize)
+                                .to_fov(sections)
+                                .unwrap();
+
+                            let value_offset_ptr = ptr.add(value_offset);
+
+                            let value_offset = typ
+                                .eq(&10)
+                                .then(|| *(value_offset_ptr as *const ULONGLONG).as_ref().unwrap())
+                                .unwrap_or(*(value_offset_ptr as *const DWORD).as_ref().unwrap()
+                                    as ULONGLONG);
+                            
+                            relocs.push((typ as u8, offset, value_offset));
+                        });
+
+                        relocs
+                    });
+
+                let base_of_fov_offset = reloc.VirtualAddress.to_fov(sections)?;
+
+                relocs.push(Reloc {
+                    reloc_offsets,
+                    base_of_fov_offset,
+                    offset_of_fov: offset,
+                    base_of_rva_offset: reloc.VirtualAddress as usize,
+                });
+
+                // 指向下一个需要重定位的表
+                // ptr + IMAGE_BASE_RELOCATION + IMAGE_BASE_RELOCATION.SizeOfBlock = 下一个重定位表
+                reloc_ptr = try_ptr!(
+                    IMAGE_BASE_RELOCATION,
+                    ptr,
+                    offset + reloc.SizeOfBlock as usize
+                );
+            }
+        }
+
+        Ok(relocs)
     }
 
     /// 解析节表
@@ -254,7 +349,6 @@ pub trait PeParse {
                 let section = Section {
                     name: String::from_utf8(name).unwrap(),
                     offset_of_self,
-                    raw_ptr: ptr,
                     virtual_address: section.VirtualAddress as usize,
                     pointer_to_raw_data: section.PointerToRawData as usize,
                     size_of_raw_data: section.SizeOfRawData as usize,
@@ -274,8 +368,6 @@ pub trait PeParse {
         unimplemented!()
     }
 }
-
-
 
 pub fn parse(raw: *mut u8) -> Result<PE> {
     unsafe {
@@ -325,5 +417,14 @@ impl TryFrom<Vec<u8>> for PE {
 
     fn try_from(mut data: Vec<u8>) -> Result<Self> {
         Self::from_bytes(&mut data)
+    }
+}
+
+impl Debug for PE {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PE")
+            .field("meta", &self.meta)
+            .field("parse", &self.parse.type_id())
+            .finish()
     }
 }

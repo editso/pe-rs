@@ -2,9 +2,9 @@ use std::fmt::Debug;
 
 use c2rs::c2rs_def;
 
-pub type WORD = u16;
-pub type DWORD = u32;
-pub type BYTE = u8;
+pub type WORD = std::os::raw::c_ushort;
+pub type DWORD = std::os::raw::c_uint;
+pub type BYTE = std::os::raw::c_uchar;
 pub type LONG = std::os::raw::c_ulong;
 pub type ULONGLONG = std::os::raw::c_ulonglong;
 pub type CHAR = u8;

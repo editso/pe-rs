@@ -1,16 +1,21 @@
+use std::collections::HashMap;
+
 use crate::*;
 
 pub struct X64PE(*mut u8);
 
 impl PeParse for X64PE {
-
-    fn parse_exports(ptr: *mut u8, sections: &[Section], virtual_address: usize) -> Result<Vec<Export>>
+    fn parse_exports(
+        ptr: *mut u8,
+        sections: &[Section],
+        virtual_address: usize,
+    ) -> Result<Vec<Export>>
     where
-            Self: Sized, {
+        Self: Sized,
+    {
         unimplemented!()
     }
 
-    
     fn parse(ptr: *mut u8) -> Result<PE> {
         unsafe {
             let dos = try_as!(IMAGE_DOS_HEADER, ptr);
@@ -50,24 +55,52 @@ impl PeParse for X64PE {
             let export_rva =
                 opt.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXPORT].VirtualAddress as usize;
 
-            if export_rva != 0 {
-                let fov = export_rva.to_fov(&sections)?;
-            }
+            let exports = if export_rva != 0 {
+                Self::parse_exports(ptr, &sections, export_rva)?
+            } else {
+                Vec::new()
+            };
 
             // 导入表 rva
             let import_rva =
                 opt.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT].VirtualAddress as usize;
 
-            Self::parse_import(ptr, &sections, import_rva)?;
+            let imports = if import_rva != 0 {
+                Self::parse_import(ptr, &sections, import_rva)?
+            } else {
+                HashMap::new()
+            };
 
             // 重定位表 rva
             let reloc_rva =
                 opt.DataDirectory[IMAGE_DIRECTORY_ENTRY_BASERELOC].VirtualAddress as usize;
 
-            Self::parse_import(ptr, &sections, reloc_rva)?;
-        }
+            let relocs = if reloc_rva != 0 {
+                Self::parse_reloc(ptr, &sections, reloc_rva)?
+            } else {
+                Vec::new()
+            };
 
-        println!("x64");
-        unimplemented!()
+            Ok(PE {
+                meta: Meta {
+                    arch: Arch::X64,
+                    imports,
+                    exports,
+                    relocs,
+                    sections,
+                    image_base: nt.OptionalHeader.ImageBase as usize,
+                    size_of_image: nt.OptionalHeader.SizeOfImage as usize,
+                    entry_pointer: nt.OptionalHeader.AddressOfEntryPoint as usize,
+                    file_alignment: nt.OptionalHeader.FileAlignment as usize,
+                    section_alignment: nt.OptionalHeader.SectionAlignment as usize,
+                    offset_of_nt_header,
+                    offset_of_file_header,
+                    offset_of_section_header,
+                    offset_of_optional_header,
+                    size_of_optional_header,
+                },
+                parse: Box::new(Self(ptr)),
+            })
+        }
     }
 }
