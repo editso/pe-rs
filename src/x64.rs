@@ -5,17 +5,7 @@ use crate::*;
 pub struct X64PE(*mut u8);
 
 impl PeParse for X64PE {
-    fn parse_exports(
-        ptr: *mut u8,
-        sections: &[Section],
-        virtual_address: usize,
-    ) -> Result<Vec<Export>>
-    where
-        Self: Sized,
-    {
-        unimplemented!()
-    }
-
+  
     fn parse(ptr: *mut u8) -> Result<PE> {
         unsafe {
             let dos = try_as!(IMAGE_DOS_HEADER, ptr);

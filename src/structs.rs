@@ -236,4 +236,19 @@ c2rs_def!(
         DWORD   SizeOfBlock;
     //  WORD    TypeOffset[1];
     };
+
+    // 导出表
+    struct IMAGE_EXPORT_DIRECTORY {
+        DWORD   Characteristics;
+        DWORD   TimeDateStamp;
+        WORD    MajorVersion;
+        WORD    MinorVersion;
+        DWORD   Name;
+        DWORD   Base;
+        DWORD   NumberOfFunctions;
+        DWORD   NumberOfNames;
+        DWORD   AddressOfFunctions;     // RVA from base of image
+        DWORD   AddressOfNames;         // RVA from base of image
+        DWORD   AddressOfNameOrdinals;  // RVA from base of image
+    };
 );

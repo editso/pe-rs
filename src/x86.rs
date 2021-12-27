@@ -52,9 +52,9 @@ impl PeParse for X86PE {
                     // 最高位如果为1说明是以序号导入
                     // 否则则按名称导入
                     let import = if iat.u1.Ordinal >> 31 == 1{
-                        Import::Ordinal(
+                        Import::ByOrdinal(
                             Ordinal{
-                                offset_of_iat: offset,
+                                offset_of_address: offset,
                                 ordinal: (iat.u1.Ordinal & !(0b1 << 31)) as usize
                             }
                         )
@@ -65,9 +65,10 @@ impl PeParse for X86PE {
 
                         os_str!(name in iin.Name.as_mut_ptr());
 
-                        Import::Function(Function{
-                            offset_of_iat: offset,
+                        Import::ByName(Name{
+                            offset_of_address: offset,
                             name: String::from_utf8(name).unwrap(),
+                            ordinal: None
                         })
 
                     };

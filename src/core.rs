@@ -1,4 +1,4 @@
-use std::{any::Any, collections::HashMap, fmt::Debug, ops::Add};
+use std::{any::Any, collections::HashMap, fmt::Debug};
 
 use crate::*;
 
@@ -33,11 +33,13 @@ pub struct Reloc {
 }
 
 #[derive(Debug)]
-pub struct Function {
+pub struct Name {
     /// 函数名称
     pub name: String,
-    /// 所在偏移
-    pub offset_of_iat: usize,
+    /// 所在偏移 fov
+    pub offset_of_address: usize,
+    /// 序号
+    pub ordinal: Option<usize>,
 }
 
 #[derive(Debug)]
@@ -45,25 +47,25 @@ pub struct Ordinal {
     /// 序号
     pub ordinal: usize,
     /// 所在偏移
-    pub offset_of_iat: usize,
+    pub offset_of_address: usize,
 }
 
 #[derive(Debug)]
 /// 导入表
 pub enum Import {
     /// 以函数名称导入
-    Function(Function),
+    ByName(Name),
     /// 以序号导入
-    Ordinal(Ordinal),
+    ByOrdinal(Ordinal),
 }
 
 #[derive(Debug)]
 /// 导出表
 pub enum Export {
     /// 以函数名称导出
-    Function(Function),
+    ByName(Name),
     /// 以序号导出
-    Ordinal(Ordinal),
+    ByOrdinal(Ordinal),
 }
 
 #[allow(unused)]
@@ -145,9 +147,72 @@ pub trait PeParse {
     where
         Self: Sized,
     {
-        todo!()
-    }
+        let mut exports = Vec::new();
 
+        unsafe {
+            let export = try_as!(
+                IMAGE_EXPORT_DIRECTORY,
+                ptr,
+                virtual_address.to_fov(sections)?
+            );
+
+            let number_of_functions = export.NumberOfFunctions as usize;
+
+            // 所有导出的函数 按序号导出 + 按名称导出
+            let export_of_functions = std::slice::from_raw_parts(
+                ptr.add(export.AddressOfFunctions.to_fov(sections)?) as *const DWORD,
+                number_of_functions,
+            );
+
+            // 按序号导出的函数
+            let export_of_ordinals = std::slice::from_raw_parts(
+                ptr.add(export.AddressOfNameOrdinals.to_fov(sections)?) as *const WORD,
+                export.NumberOfFunctions as usize,
+            );
+
+            // 按名称导出的函数
+            let export_by_names = std::slice::from_raw_parts(
+                ptr.add(export.AddressOfNames.to_fov(sections)?) as *const DWORD,
+                export.NumberOfFunctions as usize,
+            );
+
+            for i in 0..number_of_functions {
+                let mut j = 0;
+
+                while j < export.NumberOfNames as usize {
+                    if i == export_of_ordinals[j] as usize {
+                        break;
+                    }
+                    j += 1;
+                }
+
+                let export = if j < export.NumberOfNames as usize {
+                    // 按名称导出
+
+                    let mut name = Vec::new();
+
+                    os_str!(name in  ptr.add(export_by_names[j].to_fov(sections)?));
+
+                    Export::ByName(Name {
+                        name: String::from_utf8(name).unwrap(),
+                        offset_of_address: export_of_functions[i] as usize,
+                        ordinal: Some(export.Base as usize + export_of_ordinals[j] as usize),
+                    })
+                } else {
+                    // 按序号导出
+                    Export::ByOrdinal(Ordinal {
+                        ordinal: i + export.Base as usize,
+                        offset_of_address: export_of_functions[i] as usize,
+                    })
+                };
+
+                exports.push(export);
+            }
+        }
+
+        Ok(exports)
+    }
+    
     /// 解析导入表
     /// 默认解析64位PE文件
     fn parse_import(
@@ -197,9 +262,9 @@ pub trait PeParse {
                     // 最高位如果为1说明是以序号导入
                     // 否则则按名称导入
                     let import = if iat.u1.Ordinal >> 63 == 1{
-                        Import::Ordinal(
+                        Import::ByOrdinal(
                             Ordinal{
-                                offset_of_iat: offset,
+                                offset_of_address: offset,
                                 ordinal: (iat.u1.Ordinal & !(0b1 << 63)) as usize
                             }
                         )
@@ -210,8 +275,9 @@ pub trait PeParse {
 
                         os_str!(name in iin.Name.as_mut_ptr());
 
-                        Import::Function(Function{
-                            offset_of_iat: offset,
+                        Import::ByName(Name{
+                            ordinal: None,
+                            offset_of_address: offset,
                             name: String::from_utf8(name).unwrap(),
                         })
 
@@ -288,7 +354,7 @@ pub trait PeParse {
                                 .then(|| *(value_offset_ptr as *const ULONGLONG).as_ref().unwrap())
                                 .unwrap_or(*(value_offset_ptr as *const DWORD).as_ref().unwrap()
                                     as ULONGLONG);
-                            
+
                             relocs.push((typ as u8, offset, value_offset));
                         });
 
@@ -395,8 +461,7 @@ pub fn parse(raw: *mut u8) -> Result<PE> {
 
 impl PE {
     pub(crate) fn from_bytes(bytes: &mut [u8]) -> Result<Self> {
-        let ptr = bytes.as_mut_ptr();
-        parse(ptr)
+        parse(bytes.as_mut_ptr())
     }
 
     pub fn edit(self) -> Edit<PE> {
