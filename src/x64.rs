@@ -5,7 +5,6 @@ use crate::*;
 pub struct X64PE(*mut u8);
 
 impl PeParse for X64PE {
-  
     fn parse(ptr: *mut u8) -> Result<PE> {
         unsafe {
             let dos = try_as!(IMAGE_DOS_HEADER, ptr);
@@ -93,4 +92,10 @@ impl PeParse for X64PE {
             })
         }
     }
+
+    fn get_raw_ptr(&self)->*mut u8 {
+        self.0
+    }
+
+    
 }

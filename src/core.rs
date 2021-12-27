@@ -1,4 +1,4 @@
-use std::{any::Any, collections::HashMap, fmt::Debug};
+use std::{any::Any, collections::HashMap, fmt::Debug, ops::Add};
 
 use crate::*;
 
@@ -108,6 +108,12 @@ pub struct PE {
     pub(crate) parse: Box<dyn PeParse>,
 }
 
+#[allow(unused)]
+pub struct Image {
+    meta: Meta,
+    parse: Box<dyn PeParse>,
+}
+
 pub trait ToFov {
     fn to_fov(&self, sections: &[Section]) -> Result<usize>;
 }
@@ -139,6 +145,119 @@ impl ToFov for u64 {
 }
 
 pub trait PeParse {
+    fn get_raw_ptr(&self) -> *mut u8;
+
+    fn to_image(ptr: *mut u8) -> Result<Image>
+    where
+        Self: Sized,
+    {
+        unsafe {
+            let dos = try_as!(IMAGE_DOS_HEADER, ptr);
+            let nt = try_as!(IMAGE_NT_HEADERS64, ptr, dos.e_lfanew);
+
+            let image_ptr = ffi::VirtualAlloc(
+                std::ptr::null_mut(),
+                nt.OptionalHeader.SizeOfImage as usize,
+                ffi::AllocationType::MEM_COMMIT,
+                ffi::Protect::PAGE_EXECUTE_READWRITE,
+            ) as *mut u8;
+
+            if image_ptr.is_null() {
+                panic!("memory allocation error")
+            }
+
+            IMAGE_DOS_HEADER::from_mut_bytes(image_ptr).copy_from(ptr as *mut IMAGE_DOS_HEADER, 1);
+
+            IMAGE_NT_HEADERS64::from_mut_bytes(image_ptr.add(dos.e_lfanew as usize))
+                .copy_from(ptr.add(dos.e_lfanew as usize) as *mut IMAGE_NT_HEADERS64, 1);
+
+            let offset = dos.e_lfanew as usize
+                + sizeof!(DWORD)
+                + IMAGE_FILE_HEADER::size()
+                + nt.FileHeader.SizeOfOptionalHeader as usize;
+
+            IMAGE_SECTION_HEADER::from_mut_bytes(image_ptr.add(offset)).copy_from(
+                ptr.add(offset) as *mut IMAGE_SECTION_HEADER,
+                nt.FileHeader.NumberOfSections as usize,
+            );
+
+            std::slice::from_raw_parts_mut(
+                image_ptr.add(offset) as *mut IMAGE_SECTION_HEADER,
+                nt.FileHeader.NumberOfSections as usize,
+            )
+            .iter_mut()
+            .for_each(|section| {
+                std::ptr::copy(
+                    ptr.add(section.PointerToRawData as usize),
+                    image_ptr.add(section.VirtualAddress as usize),
+                    section.SizeOfRawData as usize,
+                );
+
+                section.PointerToRawData = section.VirtualAddress;
+            });
+
+            let pe = parse(image_ptr)?;
+
+            let image_base = pe.get_image_base() as u64;
+
+            for reloc in &pe.meta.relocs {
+                for (t, offset, value) in &reloc.reloc_offsets {
+                    let offset = reloc.base_of_fov_offset + *offset as usize;
+                    let value = value - image_base;
+
+                    match t {
+                        3 => {
+                            let fix = image_ptr.add(offset) as *mut u32;
+                            *fix = image_ptr.add(value as usize) as u32
+                        }
+                        10 => {
+                            let fix = image_ptr.add(offset) as *mut u64;
+                            *fix = image_ptr.add(value as usize) as u64
+                        }
+                        _ => unreachable!(),
+                    }
+                }
+            }
+
+            for (name, imports) in &pe.meta.imports {
+                let hModule = ffi::LoadLibraryA(format!("{}\0", name).as_ptr());
+
+                if hModule.is_null() {
+                    panic!("{} not found", name);
+                }
+
+                for import in imports {
+                    match import {
+                        Import::ByName(name) => {
+                            let func = image_ptr.add(name.offset_of_address) as *mut u64;
+                            let value =
+                                ffi::GetProcAddress(hModule, format!("{}\0", name.name).as_ptr())
+                                    as u64;
+
+                            if value == 0 {
+                                panic!("{} not found", name.name);
+                            }
+
+                            *func = value;
+                        }
+                        Import::ByOrdinal(ordinal) => {
+                            let func = image_ptr.add(ordinal.offset_of_address) as *mut u64;
+
+                            let v = ffi::GetProcAddress(hModule, ordinal.ordinal as ffi::LPCSTR);
+
+                            *func = v as u64;
+                        }
+                    }
+                }
+            }
+
+            Ok(Image {
+                meta: pe.meta,
+                parse: pe.parse,
+            })
+        }
+    }
+
     fn parse_exports(
         ptr: *mut u8,
         sections: &[Section],
@@ -212,7 +331,7 @@ pub trait PeParse {
 
         Ok(exports)
     }
-    
+
     /// 解析导入表
     /// 默认解析64位PE文件
     fn parse_import(
@@ -336,12 +455,12 @@ pub trait PeParse {
                 // 所有需要重定位偏移
                 let reloc_offsets = std::slice::from_raw_parts(relocs_ptr, reloc_num)
                     .iter()
-                    .fold(Vec::new(), |mut relocs, e| {
-                        let typ = e >> 12;
+                    .fold(Vec::new(), |mut relocs, offset| {
+                        let typ = offset >> 12;
 
                         (typ == 10 || typ == 3).then(|| {
                             // 真实偏移量是低12位
-                            let offset = e & 0xFFF;
+                            let offset = offset & 0xFFF;
 
                             let value_offset = (reloc.VirtualAddress as usize + offset as usize)
                                 .to_fov(sections)
@@ -464,8 +583,48 @@ impl PE {
         parse(bytes.as_mut_ptr())
     }
 
+    pub fn get_image_base(&self) -> usize {
+        self.meta.image_base
+    }
+
     pub fn edit(self) -> Edit<PE> {
         Edit { inner: self }
+    }
+}
+
+impl Image {
+    pub fn call_entry_pointer(&self) {
+        unsafe {
+            let ptr = self.parse.get_raw_ptr();
+
+            let entry_pointer: extern "C" fn() =
+                std::mem::transmute(ptr.add(self.meta.entry_pointer));
+
+            entry_pointer()
+        }
+    }
+
+    pub fn get_func(&self, mname: &str) -> ffi::LPVOID {
+        for export in &self.meta.exports {
+            match export {
+                Export::ByName(Name {
+                    name,
+                    offset_of_address,
+                    ordinal: _,
+                }) => {
+                    if name.eq(mname) {
+                        let ptr = self.parse.get_raw_ptr();
+                        unsafe {
+                            println!("{}", offset_of_address);
+                            return ptr.add(*offset_of_address) as _;
+                        }
+                    }
+                }
+                Export::ByOrdinal(_) => {}
+            }
+        }
+
+        unreachable!()
     }
 }
 

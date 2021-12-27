@@ -25,18 +25,32 @@ pub mod ffi;
 mod tests {
     use std::io::Read;
 
-    use crate::ffi;
-    use crate::PE;
+    use crate::{ffi, PeParse, X64PE};
+    use crate::{PE, X86PE};
 
     #[test]
     fn test_offset() {
+        unsafe {}
+    }
+
+    #[test]
+    fn test_image() {
+        let mut file = std::fs::File::open(r"C:\Windows\System32\User32.dll").unwrap();
+
+        let mut buf = Vec::new();
+        file.read_to_end(&mut buf);
+
+        let image = X64PE::to_image(buf.as_mut_ptr()).expect("image");
+
         unsafe {
-            let ptr = ffi::VirtualAlloc(
-                std::mem::zeroed(),
-                1024,
-                ffi::AllocationType::MEM_COMMIT,
-                ffi::Protect::PAGE_EXECUTE_READWRITE,
-            );
+            // image.call_entry_pointer();
+            let mb = image.get_func("MessageBoxA");
+
+            // 没有修复资源表 调用失败
+            let MessageBoxA: extern "C" fn(ffi::LPVOID, ffi::LPCSTR, ffi::LPCSTR, u32) =
+                std::mem::transmute(mb);
+
+            MessageBoxA(std::ptr::null_mut(), "Test\0".as_ptr(), "aaa\0".as_ptr(), 1);
         }
     }
 
@@ -52,7 +66,7 @@ mod tests {
 
         let pe = pe.expect("parse pe error");
 
-        let a = pe.edit();
+        let edit = pe.edit();
 
         // println!("size: {}", n);
 

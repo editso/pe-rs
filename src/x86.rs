@@ -171,4 +171,9 @@ impl PeParse for X86PE {
             })
         }
     }
+
+    fn get_raw_ptr(&self)->*mut u8 {
+        self.0
+    }
+
 }

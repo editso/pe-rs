@@ -13,6 +13,7 @@ pub type HANDLE = *const std::os::raw::c_void;
 pub type LPCSTR = *const u8;
 pub type HMODULE = *const std::os::raw::c_void;
 
+
 /// https://docs.microsoft.com/en-us/windows/win32/api/memoryapi/nf-memoryapi-virtualalloc
 pub mod AllocationType {
     use crate::DWORD;
@@ -52,6 +53,7 @@ pub mod Protect {
     pub const PAGE_WRITECOMBINE: DWORD = 0x400;
 }
 
+
 /// https://docs.microsoft.com/en-us/windows/win32/api/memoryapi/nf-memoryapi-virtualfreeex
 pub mod FreeType {
     use crate::DWORD;
@@ -64,6 +66,7 @@ pub mod FreeType {
     pub const MEM_COALESCE_PLACEHOLDERS: DWORD = 0x00000001;
     pub const MEM_PRESERVE_PLACEHOLDER: DWORD = 0x00000002;
 }
+
 
 #[link(name = "Kernel32", kind = "dylib")]
 extern "system" {
@@ -170,6 +173,8 @@ extern "system" {
 
 }
 
+
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -177,6 +182,7 @@ mod tests {
     #[test]
     fn test_library() {
         unsafe {
+            
             let hModule = LoadLibraryA("User32.dll\0".as_ptr());
 
             assert!(!hModule.is_null());
@@ -186,7 +192,7 @@ mod tests {
             assert!(!hModule.is_null());
 
             let MessageBoxA = GetProcAddress(hModule, "MessageBoxA\0".as_ptr());
-
+  
             assert!(!MessageBoxA.is_null());
 
             // int MessageBoxA(
@@ -227,7 +233,6 @@ mod tests {
             println!("{:?}", arr);
 
             assert!(VirtualFree(ptr, 0, FreeType::MEM_RELEASE));
-
         }
     }
 }
